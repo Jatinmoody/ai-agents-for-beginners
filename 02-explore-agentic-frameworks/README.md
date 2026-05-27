@@ -8,7 +8,7 @@ AI agent frameworks are software platforms designed to simplify the creation, de
 
 These frameworks help developers focus on the unique aspects of their applications by providing standardized approaches to common challenges in AI agent development. They enhance scalability, accessibility, and efficiency in building AI systems.
 
-## Introduction 
+## Introduction
 
 This lesson will cover:
 
@@ -58,90 +58,171 @@ This is a fast-moving landscape, but there are some things that are common acros
 
 ### Use Modular Components
 
-SDKs like the Microsoft Agent Framework offer pre-built components such as AI connectors, tool definitions, and agent management.
+SDKs like the Microsoft Agent Framework offer pre-built components such as chat clients, tool definitions, typed agents, and workflow builders.
 
 **How teams can use these**: Teams can quickly assemble these components to create a functional prototype without starting from scratch, allowing for rapid experimentation and iteration.
 
-**How it works in practice**: You can use a pre-built parser to extract information from user input, a memory module to store and retrieve data, and a prompt generator to interact with users, all without having to build these components from scratch.
+**How it works in practice**: You can use a typed `Agent` primitive together with a `FoundryChatClient` (or any other chat client that implements `SupportsChatGetResponse`), register tool functions with simple Python type annotations, and let the framework handle the tool-dispatch loop and conversation history for you — without having to build these components from scratch.
 
-**Example code**. Let's look at an example of how you can use the Microsoft Agent Framework with `AzureAIProjectAgentProvider` to have the model respond to user input with tool calling:
+**Example code**. Let's look at an example of how you can use the Microsoft Agent Framework with `FoundryChatClient` and the `Agent` primitive to have the model respond to user input with tool calling:
 
-``` python
+```python
 # Microsoft Agent Framework Python Example
 
 import asyncio
 import os
 from typing import Annotated
 
-from agent_framework.azure import AzureAIProjectAgentProvider
-from azure.identity import AzureCliCredential
+from pydantic import Field
+from dotenv import load_dotenv
+
+from agent_framework import Agent, tool
+from agent_framework.foundry import FoundryChatClient
+from azure.identity.aio import AzureCliCredential
 
 
-# Define a sample tool function to book travel
-def book_flight(date: str, location: str) -> str:
+@tool(name="book_flight", description="Book a flight for a given date and destination.")
+def book_flight(
+    date: Annotated[str, Field(description="Travel date in ISO format, e.g. 2025-01-01.")],
+    location: Annotated[str, Field(description="Destination city or airport.")],
+) -> str:
     """Book travel given location and date."""
+    # Replace with your real booking integration.
     return f"Travel was booked to {location} on {date}"
 
 
-async def main():
-    provider = AzureAIProjectAgentProvider(credential=AzureCliCredential())
-    agent = await provider.create_agent(
-        name="travel_agent",
-        instructions="Help the user book travel. Use the book_flight tool when ready.",
-        tools=[book_flight],
-    )
+async def main() -> None:
+    load_dotenv()
 
-    response = await agent.run("I'd like to go to New York on January 1, 2025")
-    print(response)
-    # Example output: Your flight to New York on January 1, 2025, has been successfully booked. Safe travels! ✈️🗽
+    async with AzureCliCredential() as credential:
+        client = FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
+            credential=credential,
+        )
+
+        agent = Agent(
+            client=client,
+            name="travel_agent",
+            instructions=(
+                "You help the user book travel. "
+                "Call the book_flight tool once you have a date and destination."
+            ),
+            tools=[book_flight],
+        )
+
+        # Non-streaming
+        result = await agent.run("I'd like to go to New York on January 1, 2025")
+        print(result)
+
+        # Streaming alternative:
+        # async for chunk in agent.run("...", stream=True):
+        #     if chunk.text:
+        #         print(chunk.text, end="", flush=True)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-What you can see from this example is how you can leverage a pre-built parser to extract key information from user input, such as the origin, destination, and date of a flight booking request. This modular approach allows you to focus on the high-level logic.
+What you can see from this example is how you can leverage the `@tool` decorator together with `Annotated` and Pydantic `Field` descriptions to expose a clean JSON schema to the model, so the agent can extract key information from user input (such as the date and destination of a flight booking request) and call the tool with the right arguments. This modular approach allows you to focus on the high-level logic.
 
 ### Leverage Collaborative Tools
 
-Frameworks like the Microsoft Agent Framework facilitate the creation of multiple agents that can work together.
+Frameworks like the Microsoft Agent Framework facilitate the creation of multiple agents that can work together through first-class orchestration primitives such as `SequentialBuilder` (pipeline), `ConcurrentBuilder` (fan-out/fan-in), and `WorkflowBuilder` (custom graphs).
 
-**How teams can use these**: Teams can design agents with specific roles and tasks, enabling them to test and refine collaborative workflows and improve overall system efficiency.
+**How teams can use these**: Teams can design agents with specific roles and tasks, then wire them into a workflow that handles message passing, context, and intermediate outputs — enabling rapid testing and refinement of collaborative patterns and improving overall system efficiency.
 
-**How it works in practice**: You can create a team of agents where each agent has a specialized function, such as data retrieval, analysis, or decision-making. These agents can communicate and share information to achieve a common goal, such as answering a user query or completing a task.
+**How it works in practice**: You can create a team of agents where each agent has a specialized function, such as data retrieval, analysis, or decision-making. A `SequentialBuilder` connects them in a pipeline; each agent receives the prior conversation (or only the prior agent's response, if you set `chain_only_agent_responses=True`) and contributes its turn toward a shared goal.
 
 **Example code (Microsoft Agent Framework)**:
 
 ```python
 # Creating multiple agents that work together using the Microsoft Agent Framework
 
+import asyncio
 import os
-from agent_framework.azure import AzureAIProjectAgentProvider
-from azure.identity import AzureCliCredential
+from typing import Annotated
 
-provider = AzureAIProjectAgentProvider(credential=AzureCliCredential())
+from pydantic import Field
+from dotenv import load_dotenv
 
-# Data Retrieval Agent
-agent_retrieve = await provider.create_agent(
-    name="dataretrieval",
-    instructions="Retrieve relevant data using available tools.",
-    tools=[retrieve_tool],
-)
+from agent_framework import Agent, AgentResponse, SequentialBuilder, tool
+from agent_framework.foundry import FoundryChatClient
+from azure.identity.aio import AzureCliCredential
 
-# Data Analysis Agent
-agent_analyze = await provider.create_agent(
-    name="dataanalysis",
-    instructions="Analyze the retrieved data and provide insights.",
-    tools=[analyze_tool],
-)
 
-# Run agents in sequence on a task
-retrieval_result = await agent_retrieve.run("Retrieve sales data for Q4")
-analysis_result = await agent_analyze.run(f"Analyze this data: {retrieval_result}")
-print(analysis_result)
+# --- Tools ----------------------------------------------------------------
+
+@tool(name="retrieve_sales", description="Retrieve sales records for a given period.")
+def retrieve_tool(
+    period: Annotated[str, Field(description="Reporting period, e.g. 'Q4 2024'.")],
+) -> str:
+    """Stub — replace with your real data-fetch (SAP, AuditBoard, SQL, etc.)."""
+    return (
+        f"Sales for {period}: "
+        "North 1.2M, South 0.9M, East 1.4M, West 0.7M. "
+        "YoY growth: +8%. Top product: SKU-447."
+    )
+
+
+@tool(name="run_analysis", description="Run descriptive analytics on a dataset summary.")
+def analyze_tool(
+    data: Annotated[str, Field(description="Raw or summarized data to analyze.")],
+) -> str:
+    """Stub — replace with your real analytics (pandas, Benford, outliers, etc.)."""
+    return f"Analysis of: {data[:80]}... → mean/variance computed, no anomalies."
+
+
+# --- Workflow -------------------------------------------------------------
+
+async def main() -> None:
+    load_dotenv()
+
+    async with AzureCliCredential() as credential:
+        # One shared client — both agents use it.
+        client = FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
+            credential=credential,
+        )
+
+        retrieve_agent = Agent(
+            client=client,
+            name="dataretrieval",
+            instructions="Retrieve relevant data using available tools. Return a concise summary.",
+            tools=[retrieve_tool],
+        )
+
+        analyze_agent = Agent(
+            client=client,
+            name="dataanalysis",
+            instructions="Analyze the retrieved data and provide insights and recommendations.",
+            tools=[analyze_tool],
+        )
+
+        # Sequential pipeline. By default each agent sees the full prior conversation;
+        # use chain_only_agent_responses=True to pass only the prior agent's reply.
+        workflow = SequentialBuilder(
+            participants=[retrieve_agent, analyze_agent],
+        ).build()
+
+        events = await workflow.run("Retrieve sales data for Q4 and analyze it.")
+        outputs = events.get_outputs()
+
+        if outputs:
+            final: AgentResponse = outputs[0]
+            print("===== Final Response =====")
+            for msg in final.messages:
+                author = msg.author_name or "assistant"
+                print(f"[{author}]\n{msg.text}\n")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-What you see in the previous code is how you can create a task that involves multiple agents working together to analyze data. Each agent performs a specific function, and the task is executed by coordinating the agents to achieve the desired outcome. By creating dedicated agents with specialized roles, you can improve task efficiency and performance.
+What you see in the previous code is how you can compose a task that involves multiple agents working together to analyze data. Each agent performs a specific function, and the `SequentialBuilder` coordinates them — passing messages between participants, preserving author/role metadata, and surfacing the final `AgentResponse` as the workflow output. By creating dedicated agents with specialized roles, you can improve task efficiency and performance.
 
 ### Learn in Real-Time
 
@@ -157,134 +238,135 @@ There are many ways to compare these approaches, but let's look at some key diff
 
 ## Microsoft Agent Framework (MAF)
 
-The Microsoft Agent Framework provides a streamlined SDK for building AI agents using `AzureAIProjectAgentProvider`. It enables developers to create agents that leverage Azure OpenAI models with built-in tool calling, conversation management, and enterprise-grade security through Azure identity.
+The Microsoft Agent Framework provides a streamlined SDK for building AI agents. It exposes typed primitives — `Agent`, `tool`, `SequentialBuilder`, `ConcurrentBuilder`, `WorkflowBuilder` — that wrap the underlying model API, the tool-dispatch loop, and conversation history into composable pieces. Pair it with a chat client such as `FoundryChatClient` (for Microsoft Foundry project endpoints) or `OpenAIChatCompletionClient` (for Azure OpenAI / OpenAI endpoints) to leverage hosted models with built-in tool calling, conversation management, and enterprise-grade security through Azure identity.
 
 **Use Cases**: Building production-ready AI agents with tool use, multi-step workflows, and enterprise integration scenarios.
 
 Here are some important core concepts of the Microsoft Agent Framework:
 
-- **Agents**. An agent is created via `AzureAIProjectAgentProvider` and configured with a name, instructions, and tools. The agent can:
-  - **Process user messages** and generate responses using Azure OpenAI models.
+- **Agents**. An agent is created by constructing an `Agent` with a chat client, a name, instructions, and tools. The agent can:
+  - **Process user messages** and generate responses using the configured model.
   - **Call tools** automatically based on the conversation context.
-  - **Maintain conversation state** across multiple interactions.
+  - **Maintain conversation state** across multiple interactions (via local history or service-managed sessions).
 
   Here is a code snippet showing how to create an agent:
 
     ```python
     import os
-    from agent_framework.azure import AzureAIProjectAgentProvider
-    from azure.identity import AzureCliCredential
+    from agent_framework import Agent
+    from agent_framework.foundry import FoundryChatClient
+    from azure.identity.aio import AzureCliCredential
 
-    provider = AzureAIProjectAgentProvider(credential=AzureCliCredential())
-    agent = await provider.create_agent(
-        name="my_agent",
-        instructions="You are a helpful assistant.",
-    )
+    async with AzureCliCredential() as credential:
+        client = FoundryChatClient(
+            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
+            model=os.environ["FOUNDRY_MODEL"],
+            credential=credential,
+        )
 
-    response = await agent.run("Hello, World!")
-    print(response)
+        agent = Agent(
+            client=client,
+            name="my_agent",
+            instructions="You are a helpful assistant.",
+        )
+
+        response = await agent.run("Hello, World!")
+        print(response)
     ```
 
-- **Tools**. The framework supports defining tools as Python functions that the agent can invoke automatically. Tools are registered when creating the agent:
+- **Tools**. The framework supports defining tools as Python functions that the agent can invoke automatically. Use `Annotated` and Pydantic `Field` to give the model rich parameter descriptions, and optionally the `@tool` decorator to set an explicit name and description. Tools are registered when constructing the agent:
 
     ```python
-    def get_weather(location: str) -> str:
-        """Get the current weather for a location."""
-        return f"The weather in {location} is sunny, 72\u00b0F."
+    from typing import Annotated
+    from pydantic import Field
+    from agent_framework import Agent, tool
 
-    agent = await provider.create_agent(
+    @tool(name="get_weather", description="Get the current weather for a location.")
+    def get_weather(
+        location: Annotated[str, Field(description="The city or location to check.")],
+    ) -> str:
+        return f"The weather in {location} is sunny, 72°F."
+
+    agent = Agent(
+        client=client,
         name="weather_agent",
         instructions="Help users check the weather.",
         tools=[get_weather],
     )
     ```
 
-- **Multi-Agent Coordination**. You can create multiple agents with different specializations and coordinate their work:
+- **Multi-Agent Coordination**. You can create multiple agents with different specializations and coordinate their work using a workflow builder, rather than piping strings between `run()` calls manually:
 
     ```python
-    planner = await provider.create_agent(
+    from agent_framework import Agent, SequentialBuilder
+
+    planner = Agent(
+        client=client,
         name="planner",
         instructions="Break down complex tasks into steps.",
     )
 
-    executor = await provider.create_agent(
+    executor = Agent(
+        client=client,
         name="executor",
         instructions="Execute the planned steps using available tools.",
         tools=[execute_tool],
     )
 
-    plan = await planner.run("Plan a trip to Paris")
-    result = await executor.run(f"Execute this plan: {plan}")
+    workflow = SequentialBuilder(participants=[planner, executor]).build()
+    events = await workflow.run("Plan a trip to Paris and then execute the plan.")
     ```
 
-- **Azure Identity Integration**. The framework uses `AzureCliCredential` (or `DefaultAzureCredential`) for secure, keyless authentication, eliminating the need to manage API keys directly.
+- **Azure Identity Integration**. The framework uses `AzureCliCredential` (or `DefaultAzureCredential`) for secure, keyless authentication, eliminating the need to manage API keys directly. For production deployments — Container Apps, Azure Functions, AKS — `DefaultAzureCredential` will automatically pick up managed identity.
 
 ## Azure AI Agent Service
 
-Azure AI Agent Service is a more recent addition, introduced at Microsoft Ignite 2024. It allows for the development and deployment of AI agents with more flexible models, such as directly calling open-source LLMs like Llama 3, Mistral, and Cohere.
+Azure AI Agent Service (now offered through Microsoft Foundry as the Foundry Agent Service) was introduced at Microsoft Ignite 2024. It allows for the development and deployment of AI agents with more flexible models, such as directly calling open-source LLMs like Llama 3, Mistral, and Cohere.
 
-Azure AI Agent Service provides stronger enterprise security mechanisms and data storage methods, making it suitable for enterprise applications. 
+Azure AI Agent Service provides stronger enterprise security mechanisms and data storage methods, making it suitable for enterprise applications.
 
-It works out-of-the-box with the Microsoft Agent Framework for building and deploying agents.
+It works out-of-the-box with the Microsoft Agent Framework: when the agent definition (instructions, tools, model) lives in the Foundry portal and the service manages the session, you connect to it from your Python code using `FoundryAgent` from `agent_framework.foundry`.
 
 This service is currently in Public Preview and supports Python and C# for building agents.
 
-Using the Azure AI Agent Service Python SDK, we can create an agent with a user-defined tool:
+Using the Microsoft Agent Framework, we can connect to a Foundry-defined agent and run it like any other agent:
 
 ```python
 import asyncio
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects import AIProjectClient
+import os
 
-# Define tool functions
-def get_specials() -> str:
-    """Provides a list of specials from the menu."""
-    return """
-    Special Soup: Clam Chowder
-    Special Salad: Cobb Salad
-    Special Drink: Chai Tea
-    """
-
-def get_item_price(menu_item: str) -> str:
-    """Provides the price of the requested menu item."""
-    return "$9.99"
+from dotenv import load_dotenv
+from agent_framework.foundry import FoundryAgent
+from azure.identity.aio import DefaultAzureCredential
 
 
 async def main() -> None:
-    credential = DefaultAzureCredential()
-    project_client = AIProjectClient.from_connection_string(
-        credential=credential,
-        conn_str="your-connection-string",
-    )
+    load_dotenv()
 
-    agent = project_client.agents.create_agent(
-        model="gpt-4o-mini",
-        name="Host",
-        instructions="Answer questions about the menu.",
-        tools=[get_specials, get_item_price],
-    )
-
-    thread = project_client.agents.create_thread()
-
-    user_inputs = [
-        "Hello",
-        "What is the special soup?",
-        "How much does that cost?",
-        "Thank you",
-    ]
-
-    for user_input in user_inputs:
-        print(f"# User: '{user_input}'")
-        message = project_client.agents.create_message(
-            thread_id=thread.id,
-            role="user",
-            content=user_input,
+    async with DefaultAzureCredential() as credential:
+        # The agent definition (name, instructions, tools like get_specials and
+        # get_item_price) lives in the Foundry portal. Here we just connect to it.
+        agent = FoundryAgent(
+            agent_name=os.environ["FOUNDRY_AGENT_NAME"],     # e.g. "Host"
+            agent_version=os.environ["FOUNDRY_AGENT_VERSION"],  # e.g. "1.0"
+            credential=credential,
+            allow_preview=True,
         )
-        run = project_client.agents.create_and_process_run(
-            thread_id=thread.id, agent_id=agent.id
-        )
-        messages = project_client.agents.list_messages(thread_id=thread.id)
-        print(f"# Agent: {messages.data[0].content[0].text.value}")
+
+        # The service creates and manages the conversation session for you.
+        session = await agent.get_session()
+
+        user_inputs = [
+            "Hello",
+            "What is the special soup?",
+            "How much does that cost?",
+            "Thank you",
+        ]
+
+        for user_input in user_inputs:
+            print(f"# User: '{user_input}'")
+            response = await agent.run(user_input, session=session)
+            print(f"# Agent: {response}")
 
 
 if __name__ == "__main__":
@@ -295,82 +377,81 @@ if __name__ == "__main__":
 
 Azure AI Agent Service has the following core concepts:
 
-- **Agent**. Azure AI Agent Service integrates with Microsoft Foundry. Within AI Foundry, an AI Agent acts as a "smart" microservice that can be used to answer questions (RAG), perform actions, or completely automate workflows. It achieves this by combining the power of generative AI models with tools that allow it to access and interact with real-world data sources. Here's an example of an agent:
+- **Agent**. Azure AI Agent Service integrates with Microsoft Foundry. Within Foundry, an AI Agent acts as a "smart" microservice that can be used to answer questions (RAG), perform actions, or completely automate workflows. It achieves this by combining the power of generative AI models with tools that allow it to access and interact with real-world data sources. With the Microsoft Agent Framework, you connect to a service-managed agent by name:
 
     ```python
-    agent = project_client.agents.create_agent(
-        model="gpt-4o-mini",
-        name="my-agent",
-        instructions="You are helpful agent",
-        tools=code_interpreter.definitions,
-        tool_resources=code_interpreter.resources,
+    from agent_framework.foundry import FoundryAgent
+    from azure.identity.aio import DefaultAzureCredential
+
+    agent = FoundryAgent(
+        agent_name="my-agent",
+        agent_version="1.0",
+        credential=DefaultAzureCredential(),
+        allow_preview=True,
     )
     ```
 
-    In this example, an agent is created with the model `gpt-4o-mini`, a name `my-agent`, and instructions `You are helpful agent`. The agent is equipped with tools and resources to perform code interpretation tasks.
+    In this example, an agent named `my-agent` (defined in Foundry with its model, instructions, and tools — including hosted tools such as code interpreter, file search, and Bing) is referenced by name. The agent's full configuration lives server-side, and your client code only needs the name and version.
 
-- **Thread and messages**. The thread is another important concept. It represents a conversation or interaction between an agent and a user. Threads can be used to track the progress of a conversation, store context information, and manage the state of the interaction. Here's an example of a thread:
+- **Sessions and messages**. A session represents a conversation between an agent and a user. Sessions track the progress of a conversation, store context information, and manage the state of the interaction — and because the Foundry Agent Service manages them server-side, conversations survive across processes and deployments. Here's an example:
 
     ```python
-    thread = project_client.agents.create_thread()
-    message = project_client.agents.create_message(
-        thread_id=thread.id,
-        role="user",
-        content="Could you please create a bar chart for the operating profit using the following data and provide the file to me? Company A: $1.2 million, Company B: $2.5 million, Company C: $3.0 million, Company D: $1.8 million",
+    # Create a service-managed session for this conversation.
+    session = await agent.get_session()
+
+    response = await agent.run(
+        "Could you please create a bar chart for the operating profit using the "
+        "following data and provide the file to me? "
+        "Company A: $1.2 million, Company B: $2.5 million, "
+        "Company C: $3.0 million, Company D: $1.8 million",
+        session=session,
     )
-    
-    # Ask the agent to perform work on the thread
-    run = project_client.agents.create_and_process_run(thread_id=thread.id, agent_id=agent.id)
-    
-    # Fetch and log all messages to see the agent's response
-    messages = project_client.agents.list_messages(thread_id=thread.id)
-    print(f"Messages: {messages}")
+    print(response)
     ```
 
-    In the previous code, a thread is created. Thereafter, a message is sent to the thread. By calling `create_and_process_run`, the agent is asked to perform work on the thread. Finally, the messages are fetched and logged to see the agent's response. The messages indicate the progress of the conversation between the user and the agent. It's also important to understand that the messages can be of different types such as text, image, or file, that is the agents work has resulted in for example an image or a text response for example. As a developer, you can then use this information to further process the response or present it to the user.
+    In the previous code, a session is created, then a user message is sent and the agent runs against it. Responses can contain different content types — text, images, or files — depending on what tools the Foundry agent has access to (for example, the code interpreter tool can produce charts as file outputs). As a developer, you can then use this information to further process the response or present it to the user.
 
-- **Integrates with the Microsoft Agent Framework**. Azure AI Agent Service works seamlessly with the Microsoft Agent Framework, which means you can build agents using `AzureAIProjectAgentProvider` and deploy them through the Agent Service for production scenarios.
+- **Integrates with the Microsoft Agent Framework**. Azure AI Agent Service works seamlessly with the Microsoft Agent Framework: use `Agent(client=FoundryChatClient(...))` when your application owns the agent definition (instructions, tools, conversation loop), and use `FoundryAgent` when the agent definition lives in Foundry and the service owns the session.
 
 **Use Cases**: Azure AI Agent Service is designed for enterprise applications that require secure, scalable, and flexible AI agent deployment.
 
 ## What's the difference between these approaches?
- 
+
 It does sound like there is overlap, but there are some key differences in terms of their design, capabilities, and target use cases:
- 
-- **Microsoft Agent Framework (MAF)**: Is a production-ready SDK for building AI agents. It provides a streamlined API for creating agents with tool calling, conversation management, and Azure identity integration.
-- **Azure AI Agent Service**: Is a platform and deployment service in Azure Foundry for agents. It offers built-in connectivity to services like Azure OpenAI, Azure AI Search, Bing Search and code execution.
- 
+
+- **Microsoft Agent Framework (MAF)**: Is a production-ready SDK for building AI agents in your own application code. It provides typed primitives — `Agent`, `tool`, `SequentialBuilder`, `ConcurrentBuilder`, `WorkflowBuilder` — for creating agents with tool calling, conversation management, multi-agent orchestration, and Azure identity integration.
+- **Azure AI Agent Service**: Is a platform and deployment service in Microsoft Foundry for agents. It offers built-in connectivity to services like Azure OpenAI, Azure AI Search, Bing Search, and code execution, and lets you define and version your agent in the Foundry portal.
+
 Still not sure which one to choose?
 
 ### Use Cases
- 
+
 Let's see if we can help you by going through some common use cases:
- 
+
 > Q: I'm building production AI agent applications and want to get started quickly
 >
+> A: The Microsoft Agent Framework is a great choice. It provides a simple, Pythonic API via `Agent(client=FoundryChatClient(...))` that lets you define agents with tools and instructions in just a few lines of code.
 
->A: The Microsoft Agent Framework is a great choice. It provides a simple, Pythonic API via `AzureAIProjectAgentProvider` that lets you define agents with tools and instructions in just a few lines of code.
-
->Q: I need enterprise-grade deployment with Azure integrations like Search and code execution
+> Q: I need enterprise-grade deployment with Azure integrations like Search and code execution
 >
-> A: Azure AI Agent Service is the best fit. It's a platform service that provides built-in capabilities for multiple models, Azure AI Search, Bing Search and Azure Functions. It makes it easy to build your agents in the Foundry Portal and deploy them at scale.
- 
+> A: Azure AI Agent Service is the best fit. It's a platform service that provides built-in capabilities for multiple models, Azure AI Search, Bing Search, and Azure Functions. It makes it easy to build your agents in the Foundry Portal and deploy them at scale — and connect to them from code via `FoundryAgent`.
+
 > Q: I'm still confused, just give me one option
 >
-> A: Start with the Microsoft Agent Framework to build your agents, and then use Azure AI Agent Service when you need to deploy and scale them in production. This approach lets you iterate quickly on your agent logic while having a clear path to enterprise deployment.
- 
+> A: Start with the Microsoft Agent Framework to build your agents (with `Agent` + `FoundryChatClient`), and then use Azure AI Agent Service when you need to deploy and scale them in production (connecting via `FoundryAgent`). This approach lets you iterate quickly on your agent logic while having a clear path to enterprise deployment.
+
 Let's summarize the key differences in a table:
 
 | Framework | Focus | Core Concepts | Use Cases |
 | --- | --- | --- | --- |
-| Microsoft Agent Framework | Streamlined agent SDK with tool calling | Agents, Tools, Azure Identity | Building AI agents, tool use, multi-step workflows |
-| Azure AI Agent Service | Flexible models, enterprise security, Code generation, Tool calling | Modularity, Collaboration, Process Orchestration | Secure, scalable, and flexible AI agent deployment |
+| Microsoft Agent Framework | Streamlined agent SDK with tool calling and orchestration | `Agent`, `tool`, `SequentialBuilder` / `ConcurrentBuilder` / `WorkflowBuilder`, Chat Clients (`FoundryChatClient`, `OpenAIChatCompletionClient`), Azure Identity | Building AI agents, tool use, multi-step workflows, multi-agent orchestration |
+| Azure AI Agent Service | Flexible models, enterprise security, code generation, hosted tools | Service-managed Agents and Sessions, hosted tools (code interpreter, file search, Bing), connected via `FoundryAgent` | Secure, scalable, and flexible AI agent deployment |
 
 ## Can I integrate my existing Azure ecosystem tools directly, or do I need standalone solutions?
 
 The answer is yes, you can integrate your existing Azure ecosystem tools directly with Azure AI Agent Service especially, as it has been built to work seamlessly with other Azure services. You could for example integrate Bing, Azure AI Search, and Azure Functions. There's also deep integration with Microsoft Foundry.
 
-The Microsoft Agent Framework also integrates with Azure services through `AzureAIProjectAgentProvider` and Azure identity, letting you call Azure services directly from your agent tools.
+The Microsoft Agent Framework also integrates with Azure services through chat clients such as `FoundryChatClient` and `OpenAIChatCompletionClient`, and uses Azure identity (`AzureCliCredential`, `DefaultAzureCredential`, managed identity) for keyless authentication — letting you call Azure services directly from your agent tools.
 
 ## Sample Codes
 
